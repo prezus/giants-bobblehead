@@ -28,8 +28,12 @@ pub static CLIPS: &[Clip] = &[
         pcm: include_bytes!("../assets/bonds.pcm"),
     },
     Clip {
-        name: "pine",
-        pcm: include_bytes!("../assets/pine.pcm"),
+        name: "izzy-pine",
+        pcm: include_bytes!("../assets/izzy-pine.pcm"),
+    },
+    Clip {
+        name: "bumgarner",
+        pcm: include_bytes!("../assets/Bumgarner.pcm"),
     },
 ];
 
