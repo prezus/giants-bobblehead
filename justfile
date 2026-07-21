@@ -47,9 +47,15 @@ size: build-release
     {{esp}} && xtensa-esp32-elf-size {{elf_release}}
 
 # Preview a converted clip on your computer, e.g. `just play pine`.
-# Raw PCM has no header, so we tell ffplay the format: mono s16le @ 22050 Hz.
+# Raw PCM has no header, so ffmpeg wraps it (mono s16le @ 22050 Hz) into a WAV
+# that macOS's afplay can play — quiet, no progress spam.
 play name:
-    ffplay -hide_banner -autoexit -nodisp -f s16le -ar 22050 -ac 1 "assets/{{name}}.pcm"
+    #!/usr/bin/env sh
+    set -e
+    tmp="$(mktemp -t gb_play).wav"
+    ffmpeg -hide_banner -v error -y -f s16le -ar 22050 -ac 1 -i "assets/{{name}}.pcm" "$tmp"
+    afplay "$tmp"
+    rm -f "$tmp"
 
 # Regenerate PCM clips from the MP3 sources (mono, s16le, 22050 Hz).
 convert:
