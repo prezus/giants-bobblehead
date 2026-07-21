@@ -20,11 +20,18 @@ pub struct Clip {
 }
 
 /// All clips, played in round-robin order (see the RTC-persistent index in
-/// `main.rs`). Replace the placeholder with real announcer bites.
-pub static CLIPS: &[Clip] = &[Clip {
-    name: "placeholder-arpeggio",
-    pcm: include_bytes!("../assets/placeholder_arpeggio.pcm"),
-}];
+/// `main.rs`). The `.pcm` files are generated from the `.mp3` sources in
+/// `assets/` via `just convert`.
+pub static CLIPS: &[Clip] = &[
+    Clip {
+        name: "bonds",
+        pcm: include_bytes!("../assets/bonds.pcm"),
+    },
+    Clip {
+        name: "pine",
+        pcm: include_bytes!("../assets/pine.pcm"),
+    },
+];
 
 /// Number of embedded clips.
 pub const COUNT: usize = CLIPS.len();

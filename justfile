@@ -46,6 +46,21 @@ monitor:
 size: build-release
     {{esp}} && xtensa-esp32-elf-size {{elf_release}}
 
+# Preview a converted clip on your computer, e.g. `just play pine`.
+# Raw PCM has no header, so we tell ffplay the format: mono s16le @ 22050 Hz.
+play name:
+    ffplay -hide_banner -autoexit -nodisp -f s16le -ar 22050 -ac 1 "assets/{{name}}.pcm"
+
+# Regenerate PCM clips from the MP3 sources (mono, s16le, 22050 Hz).
+convert:
+    #!/usr/bin/env sh
+    set -e
+    for f in assets/*.mp3; do
+        out="${f%.mp3}.pcm"
+        echo "converting $f -> $out"
+        ffmpeg -y -v error -i "$f" -ac 1 -ar 22050 -f s16le "$out"
+    done
+
 # Remove build artifacts.
 clean:
     cargo clean

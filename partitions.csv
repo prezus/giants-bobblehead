@@ -1,0 +1,7 @@
+# Partition table for giants-bobblehead on the ESP32 Feather V2 (8 MB flash).
+# The default espflash table only gives the app ~1 MB; our embedded audio pushes
+# the firmware past 2 MB, so we hand it a 4 MB factory partition.
+# Name,     Type, SubType,  Offset,   Size,  Flags
+nvs,        data, nvs,      0x9000,   0x6000,
+phy_init,   data, phy,      0xf000,   0x1000,
+factory,    app,  factory,  0x10000,  4M,
