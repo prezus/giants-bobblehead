@@ -931,6 +931,7 @@ version = "0.1.0"
 dependencies = [
  "critical-section",
  "embassy-executor",
+ "embassy-futures",
  "embassy-time",
  "esp-alloc",
  "esp-backtrace",
@@ -939,6 +940,7 @@ dependencies = [
  "esp-println",
  "esp-rtos",
  "log",
+ "nb 1.1.0",
  "static_cell",
 ]
 

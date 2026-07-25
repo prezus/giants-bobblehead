@@ -7,23 +7,41 @@
 //!
 //! | Feather pin | GPIO | Connects to                                   |
 //! |-------------|------|-----------------------------------------------|
-//! | D14         | 14   | MAX98357A **BCLK**                            |
-//! | D15         | 15   | MAX98357A **LRC** (word select / WS)         |
-//! | D32         | 32   | MAX98357A **DIN** (data)                     |
-//! | D33         | 33   | MAX98357A **SD** (shutdown: HIGH = amp on)   |
-//! | D27         | 27   | Button to **GND** (RTC-capable, ext0 wakeup) |
-//! | 3V3 / GND   | —    | MAX98357A **Vin** / **GND**, speaker +/-      |
+//! | TX          | 8    | MAX98357A **BCLK**                            |
+//! | RX          | 7    | MAX98357A **LRC** (word select / WS)         |
+//! | D14         | 14   | MAX98357A **DIN** (data)                     |
+//! | D33         | 33   | MAX98357A **SD** (amp enable)                |
+//! | D27         | 27   | 5666 button **A2** pad (ext0 wakeup)         |
+//! | BAT         | —    | MAX98357A **Vin** (battery-backed supply)    |
+//! | GND         | —    | Amp **GND/GAIN**, button **GND**, speaker    |
+//! | 3V3         | —    | 10 kΩ pull-up to GPIO27 (see below)          |
+//! | —           | —    | Speaker **+/–** across MAX98357A **+/–**     |
+//! | —           | —    | 10 kΩ from MAX98357A **SD** to **GND**       |
 //!
-//! ## Button pull-up (important for deep-sleep wakeup)
-//! The button connects GPIO27 to GND (active-low), so the pin needs a pull-up
-//! to read HIGH when idle. GPIO27 is RTC-capable (`RTC_GPIO17`) so ext0 can wake
-//! the chip on a falling edge (`WakeupLevel::Low`). Add a **10 kΩ resistor from
-//! GPIO27 to 3V3** for a reliable, low-leakage pull-up during deep sleep.
+//! ## Trigger button (external 5666 IoT button → GPIO27)
+//! Playback is triggered by the **Adafruit 5666 IoT button**. Its **A2** pad
+//! connects GPIO27 to GND when pressed (active-low), and each press wakes the
+//! chip from deep sleep via ext0 (`WakeupLevel::Low`) to play a **random** clip.
+//! GPIO27 is RTC-capable (`RTC_GPIO17`).
 //!
-//! ## Zero-wiring test option
-//! The Feather's **onboard user button is GPIO38** and already has a hardware
-//! pull-up, so you can prove out wake→play→sleep before wiring the external
-//! button by setting [`BUTTON_ACTIVE_LOW`] accordingly and using GPIO38.
+//! The 5666 has **no on-board pull-up**, so the firmware enables GPIO27's
+//! internal pull-up to read HIGH when idle. Internal pulls don't hold reliably
+//! through deep sleep, so also fit an external **10 kΩ from GPIO27 to 3V3** for
+//! a stable, low-leakage hold — without it, wakeups can be flaky.
+//!
+//! The Feather's onboard **SW38 button (GPIO38)** is reserved as a bench-test
+//! trigger (polled while awake, not a deep-sleep wake source).
+//!
+//! ## Battery power and amp shutdown
+//! Power the MAX98357A from **BAT**, not USB, so audio works when USB-C is
+//! disconnected. GPIO33 drives **SD** high only during playback. Fit an
+//! external **10 kΩ pulldown from SD to GND** so the amp remains shut down while
+//! the ESP32 resets and while its GPIOs are high-impedance in deep sleep.
+//!
+//! ## Battery monitor
+//! The Feather's built-in two-resistor divider connects BAT/2 to **GPIO35
+//! (ADC1)**. Firmware averages that input at boot, warns below 3.6 V, and skips
+//! audio below 3.4 V. No external monitor wiring is required.
 
 /// Playback sample rate (Hz). All embedded clips MUST be mono, 16-bit signed,
 /// little-endian PCM at this rate. See [`crate::clips`].
@@ -34,10 +52,8 @@ pub const SAMPLE_RATE: u32 = 22_050;
 /// multiple of 4.
 pub const DMA_BUF_BYTES: usize = 32_000;
 
-/// Milliseconds to wait after enabling the amp (SD high) before streaming,
-/// letting the MAX98357A settle to avoid a click at the start of a clip.
+/// Milliseconds to wait after enabling the amplifier before streaming audio.
 pub const AMP_SETTLE_MS: u64 = 5;
 
-/// Milliseconds to hold the amp on after the last sample drains, before pulling
-/// SD low, so the tail of the clip isn't clipped.
+/// Milliseconds to leave the amp enabled after the final silence is queued.
 pub const AMP_TAIL_MS: u64 = 30;

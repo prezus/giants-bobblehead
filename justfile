@@ -30,6 +30,13 @@ check:
 clippy:
     {{esp}} && cargo clippy
 
+# Run the host-side tests for the pure battery policy module. The firmware
+# target is no_std and has no Rust test harness, so compile this module alone.
+test-battery:
+    mkdir -p target
+    rustc +stable --test src/battery.rs -o target/battery-tests
+    target/battery-tests
+
 # Flash release build to the ESP32 over USB and open the serial monitor.
 flash:
     {{esp}} && cargo run --release

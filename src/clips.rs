@@ -19,9 +19,10 @@ pub struct Clip {
     pub pcm: &'static [u8],
 }
 
-/// All clips, played in round-robin order (see the RTC-persistent index in
-/// `main.rs`). The `.pcm` files are generated from the `.mp3` sources in
-/// `assets/` via `just convert`.
+/// All clips. A press of the external button plays one at random (never the
+/// same one twice in a row — see the RTC-persistent `LAST_CLIP` in `main.rs`).
+/// The `.pcm` files are generated from the `.mp3` sources in `assets/` via
+/// `just convert`.
 pub static CLIPS: &[Clip] = &[
     Clip {
         name: "bonds",

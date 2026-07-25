@@ -5,5 +5,6 @@
 //! straight back into deep sleep. See [`board`] for the wiring map.
 
 pub mod audio;
+pub mod battery;
 pub mod board;
 pub mod clips;
