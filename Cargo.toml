@@ -9,7 +9,11 @@ name = "giants-bobblehead"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-hal = { version = "~1.1.0", features = ["esp32", "log-04", "unstable"] }
+# Pinned exactly: RTC-fast retention across deep sleep depends on an upstream
+# commented-out register write, so a patch bump can silently break the no-repeat
+# clip selection. See `clips::LAST_CLIP`; after any bump, press the button twice
+# and confirm the log names two different clips.
+esp-hal = { version = "=1.1.1", features = ["esp32", "log-04", "unstable"] }
 
 esp-rtos = { version = "0.3.0", features = [
   "embassy",
@@ -33,9 +37,15 @@ esp-backtrace = { version = "0.19.0", features = [
 ] }
 esp-println = { version = "0.17.0", features = ["esp32", "log-04"] }
 
-critical-section = "1.2.0"
-static_cell      = "2.1.1"
+# Applies to both the lib and the bin target.
+[lints.rust]
+missing_docs           = "warn"
+unsafe_op_in_unsafe_fn = "deny"
 
+[lints.clippy]
+# mem::forget is generally not safe to do with esp_hal types, especially those
+# holding buffers for the duration of a data transfer.
+mem_forget = "deny"
 
 # For fine tuning these settings, please refer to https://doc.rust-lang.org/cargo/reference/profiles.html
 [profile.dev]

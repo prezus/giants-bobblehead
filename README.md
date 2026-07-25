@@ -5,6 +5,13 @@ announcer sound bite, and the board drops straight back into deep sleep. It is
 built `no_std` on [`esp-hal`](https://github.com/esp-rs/esp-hal), monitors its
 LiPo at boot, and shuts down the amplifier between plays.
 
+> **Status: not yet validated on hardware.** The firmware builds and its pure
+> logic is unit-tested, but the assembled device has not been bench-tested. In
+> particular the ADC voltage scale needs calibrating against a multimeter before
+> the battery thresholds mean anything — see
+> [Battery monitoring](#charging-and-battery-monitoring) and
+> [Hardware validation still required](#hardware-validation-still-required).
+
 ## Hardware
 
 | Part | Product | Role |
@@ -12,7 +19,8 @@ LiPo at boot, and shuts down the amplifier between plays.
 | Adafruit **ESP32 Feather V2** | [5400](https://www.adafruit.com/product/5400) | MCU (Xtensa dual-core, 8 MB flash, 2 MB PSRAM) |
 | **MAX98357A** I2S amp | [3006](https://www.adafruit.com/product/3006) | I2S DAC + 3 W class-D amplifier |
 | Mono enclosed speaker 3 W 4 Ω | [4445](https://www.adafruit.com/product/4445) | Speaker |
-| IoT Button + NeoPixel BFF | [5666](https://www.adafruit.com/product/5666) | Trigger button (NeoPixel unused for now) |
+| IoT Button + NeoPixel BFF | [5666](https://www.adafruit.com/product/5666) | Trigger button (its NeoPixel is not used) |
+| Single-cell LiPo, JST PH2.0 | e.g. Qimoo 503450 3.7 V 1000 mAh | Power |
 
 > **Note:** the IoT Button (5666) is a "BFF" for QT Py / Xiao, so it won't stack
 > on the Feather — we just use its button + GND pads and wire them over.
@@ -28,9 +36,17 @@ Signal chain: `ESP32 --I2S--> MAX98357A --> speaker`, triggered by the button.
 | D14 | 14 | MAX98357A **DIN** |
 | D33 | 33 | MAX98357A **SD** (shutdown — HIGH = amp on) |
 | D27 | 27 | Button **A2** pad (active-low trigger) |
+| — | 2 | *On-board only:* NeoPixel / STEMMA QT power, held LOW |
+| A13 | 35 | *On-board only:* BAT/2 via the Feather's divider |
 | BAT | — | MAX98357A **Vin** |
-| GND | — | MAX98357A **GND** and **GAIN**, button **GND** |
+| GND | — | MAX98357A **GND** and **GAIN**, button **GND**, speaker **–** |
+| 3V3 | — | 10 kΩ pull-up to GPIO27 (see below) |
 | — | — | MAX98357A **+/−** → speaker **+/−** |
+| — | — | 10 kΩ from MAX98357A **SD** to **GND** |
+
+GPIO2 and GPIO35 need no external wiring; they are listed because the firmware
+drives or reads them, so anything repurposing those pins will conflict. The same
+table lives in `src/board.rs` as rustdoc — keep the two in sync.
 
 **Button pull-up:** GPIO27 is driven active-low (button to GND). The firmware
 enables an internal pull-up, but for a reliable, low-leakage hold through deep
@@ -59,20 +75,63 @@ or termination behavior.
 
 The Feather also has a built-in pair of 200 kΩ resistors that presents half of
 the BAT voltage on **GPIO35 / ADC1**. On every boot the firmware discards one
-settling sample, averages 16 readings, and applies this policy:
+settling sample, averages up to 16 readings (skipping any that fail), and
+applies this policy:
 
 | Approximate battery voltage | Behavior |
 |-----------------------------|----------|
-| Below 2.5 V | Treat as no battery / USB-only operation |
+| Below 2.5 V | Treat as no battery / USB-only operation, play normally |
 | 2.5–3.4 V | Log a critical warning, skip audio, return to sleep |
 | 3.4–3.6 V | Play normally and log a charge-soon warning |
 | 3.6 V and above | Play normally |
 
-The classic ESP32 ADC is noisy and the current HAL does not apply per-device
-calibration, so the voltage is intentionally approximate. Verify the logged
-reading against a multimeter before relying on the thresholds in a finished
-unit. This is a runtime power policy, not a substitute for a protected LiPo or
-the Feather's hardware protection.
+Note the first row: a reading that low cannot be a working battery, so the
+firmware assumes USB is supplying the current and allows playback. That means
+the policy is **not monotonic** — a collapsed cell reads as "USB" and plays,
+while a merely low one refuses. This is deliberate, so that a board with no
+battery fitted still works.
+
+#### Calibrating the voltage scale
+
+**This is the one step you must do before trusting any of the thresholds above.**
+
+`esp-hal` provides no ADC calibration curve for the original ESP32 (only for the
+S2/S3 and RISC-V parts), so `src/battery.rs` derives the ADC's full-scale voltage
+from the chip's own reference voltage, read from the eFuse `ADC_VREF` field, times
+the nominal 11 dB attenuation ratio. That gets the scale into the right
+neighbourhood but not better than about ±10%: Espressif originally called this
+attenuation setting 11 dB and later relabelled the identical hardware 12 dB, and
+per-chip spread widens the band further.
+
+To calibrate, flash and watch the log:
+
+```
+adc: vref 1100 mV (efuse 0x0), full scale 3902 mV
+battery: ~4120 mV (raw 2161, Normal)
+```
+
+Measure BAT with a multimeter and compare. If they disagree, compute the true
+full scale and put it in `battery.rs`:
+
+```
+full_scale_mv = measured_mV * 4095 / (raw * 2)
+```
+
+Then replace the `full_scale_mv(vref_mv)` call in `src/bin/main.rs` with your
+measured constant, or scale `ATTEN_11DB_RATIO_MILLI` to match. Re-run
+`just test` afterwards — the tests derive their raw codes from the same constant
+and will follow automatically.
+
+> Take the figure from the ADC's **full-scale** voltage — the input that would
+> produce code 4095 — not from Espressif's *recommended input range* ceiling
+> (2450 mV at this attenuation). Those are different numbers, and using the
+> latter under-reads by about 20%, which is enough to classify a fully charged
+> cell as `Critical` and refuse to play.
+
+The reading is also taken **before** the amplifier is enabled, so it is an
+open-circuit voltage. The MAX98357A draws close to 900 mA at peak, which on a
+1000 mAh cell is nearly 1C and will sag noticeably — a battery that passes the
+check unloaded may still droop under load. Treat these numbers as coarse.
 
 ## How it works
 
@@ -84,11 +143,18 @@ battery, plays when power is healthy, and sleeps again:
 deep sleep --button--> boot --> sample BAT --> amp on --> play --> amp off --> deep sleep
 ```
 
-The first cold boot plays `izzy-pine`; later clips are selected randomly without
-immediate repeats. The last clip index lives in RTC RAM across deep-sleep
-resets. While awake, another button press interrupts the current clip and starts
-a different one. When a clip finishes uninterrupted, GPIO33 shuts down the amp
-and the board returns to deep sleep.
+The first cold boot plays `izzy-pine` (`clips::FIRST_BOOT`); later clips are
+selected randomly without immediate repeats. The last clip index lives in RTC
+fast RAM across deep-sleep resets. While awake, another button press interrupts
+the current clip and starts a different one. When a clip finishes uninterrupted,
+GPIO33 shuts down the amp and the board returns to deep sleep.
+
+> **`esp-hal` is pinned exactly** (`=1.1.1`) because that RTC-fast retention
+> relies on an upstream implementation detail: `RtcSleepConfig::deep()` intends to
+> power down both RTC memories, but only the `slowmem` write actually happens —
+> the `fastmem` one is commented out under a `TODO`. See `clips::LAST_CLIP`. After
+> any `esp-hal` bump, press the button twice and confirm the log names two
+> different clips.
 
 The Feather itself is specified around **80–100 µA** from LiPo in deep sleep.
 The finished assembly will draw more depending on the amplifier shutdown
@@ -96,54 +162,104 @@ current, battery-monitor divider, pull-ups, and battery protection board.
 
 ### Source layout
 
+- `src/lib.rs` — crate root; declares the modules below
 - `src/board.rs` — pin map, sample rate, and timing constants
-- `src/battery.rs` — ADC conversion and low-battery policy
-- `src/clips.rs` — embedded sound bites (`include_bytes!`)
+- `src/battery.rs` — ADC conversion and low-battery policy *(host-tested)*
+- `src/pcm.rs` — mono→stereo expansion into the DMA buffer *(host-tested)*
+- `src/selection.rs` — which clip plays next, and the no-repeat rule *(host-tested)*
+- `src/clips.rs` — embedded sound bites (`include_bytes!`) and the RTC-persistent last-played marker
 - `src/audio.rs` — circular I2S streaming and press-to-interrupt playback
 - `src/bin/main.rs` — wake → battery check → play → sleep control flow
+- `build.rs` — adds esp-hal's linker script and friendlier linker errors
+- `partitions.csv` — custom partition table (see [Adding sound bites](#adding-sound-bites))
+
+`battery.rs`, `pcm.rs` and `selection.rs` are deliberately free of `esp-hal` and
+of `use crate::...` imports so they can be compiled standalone against std for
+testing. Keep them that way or `just test` stops working.
 
 ## Building & flashing
 
-This targets the ESP32 (Xtensa), so it needs the Espressif Rust toolchain. The
-`esp` toolchain is already installed here (via [`espup`](https://github.com/esp-rs/espup)),
-and the pinned toolchain + `xtensa-esp32-none-elf` target are selected
-automatically via `rust-toolchain.toml` and `.cargo/config.toml`.
+This targets the ESP32 (Xtensa), so it needs the Espressif Rust toolchain,
+installed with [`espup`](https://github.com/esp-rs/espup):
 
-Use the [`justfile`](./justfile) — every recipe sources the Espressif env
-(`~/export-esp.sh`) so the GCC linker is on `PATH`; you don't need to source
-anything yourself:
+```sh
+cargo install espup
+espup install          # installs the `esp` toolchain, rust-src, and the GCC linker
+```
+
+`espup` writes `~/export-esp.sh`, which puts `xtensa-esp32-elf-gcc` on `PATH`.
+`rust-toolchain.toml` selects the `esp` toolchain; the
+`xtensa-esp32-none-elf` target and the `build-std` settings (which require the
+`rust-src` component) come from `.cargo/config.toml`.
+
+Then use the [`justfile`](./justfile) — every recipe sources `~/export-esp.sh`
+for you, so you don't need to source anything yourself:
 
 ```sh
 just             # list recipes
 just build       # compile (debug)
+just check       # fast type-check
+just clippy      # lint
+just test        # host-side unit tests (battery + pcm + selection)
+just verify      # clippy + test, run before committing
 just flash       # flash release build + serial monitor over USB-C
 just monitor     # open the serial monitor without reflashing
 just size        # firmware size breakdown
-just test-battery # host-side battery policy tests
+just convert     # regenerate .pcm from the .mp3 sources
+just play NAME   # preview a clip on your computer, e.g. `just play izzy-pine`
 ```
 
-`just flash` runs `espflash flash --monitor` (see `.cargo/config.toml`), so
-you'll see the log output and can watch the wake→play→sleep cycle.
+`just flash` runs `espflash flash --monitor` with the custom partition table
+(see `.cargo/config.toml`), so you'll see the log output and can watch the
+wake→play→sleep cycle.
 
 If you'd rather use `cargo` directly, `source ~/export-esp.sh` first (add it to
-your shell profile to make it automatic), then `cargo build` / `cargo run --release`.
+your shell profile to make it automatic), then `cargo build` /
+`cargo run --release`.
 
-## Adding real sound bites
+`cargo test` does **not** work: the default target is xtensa and the firmware is
+`no_std` with no test harness. `just test` compiles the pure modules standalone
+against std instead.
+
+## Adding sound bites
 
 Clips are raw **mono, 16-bit signed, little-endian PCM at 22 050 Hz** (no WAV
-header). Convert an audio file and drop it in `assets/`:
+header), embedded with `include_bytes!`.
+
+1. Drop an **MP3** in `assets/` — use a lowercase, hyphenated name.
+2. Run `just convert` to generate the matching `.pcm`. Both files are committed,
+   so a fresh clone builds without `ffmpeg`.
+3. Add a `Clip` entry to `CLIPS` in `src/clips.rs`.
+4. `just play NAME` to preview, `just size` to check the budget.
+
+`just convert` only looks at `assets/*.mp3`. To use a source in another format,
+convert it by hand with the same flags:
 
 ```sh
 ffmpeg -i kruk_and_kuip.wav -ac 1 -ar 22050 -f s16le assets/kruk.pcm
 ```
 
-Then add an entry to `CLIPS` in `src/clips.rs`. Keep clips short — each second of
-audio is ~44 KB, and 8 MB flash holds plenty of them.
+### Size budget
+
+The app image lives in the **6 MB `factory` partition** defined by
+`partitions.csv` — not the full 8 MB of flash. The default espflash table would
+only give the app about 1 MB, which is why the custom table exists; the cargo
+runner passes it automatically.
+
+Each second of audio is ~44 KB and the code is well under 100 KB, so the ceiling
+is roughly **135 seconds of audio in total**. The three clips currently shipped
+use about 77 s (~3.3 MB), leaving ~58 s of headroom. Keep individual clips to a
+few seconds — a bobblehead that talks for 40 seconds is a bobblehead nobody
+presses twice.
 
 ## Hardware validation still required
 
-- Compare the logged GPIO35 voltage with a multimeter and tune the ADC scale or
-  thresholds if necessary.
+- **Calibrate the ADC**: compare the logged GPIO35 voltage with a multimeter and
+  set the full scale accordingly (see
+  [Calibrating the voltage scale](#calibrating-the-voltage-scale)). Until this is
+  done the battery thresholds are guesses.
+- **Confirm no-repeat selection survives deep sleep**: press twice, check the log
+  names two different clips.
 - Measure deep-sleep current with the amp SD pulldown fitted.
 - Verify battery-only playback with the amp powered from BAT.
 - Verify the GPIO27 external pull-up holds reliably through deep sleep.

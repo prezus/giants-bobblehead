@@ -1,3 +1,7 @@
+//! Build script: adds esp-hal's linker script and installs a linker
+//! error-handling hook that turns common undefined-symbol failures into
+//! actionable hints. Stock `esp-generate` template code.
+
 fn main() {
     linker_be_nice();
     // make sure linkall.x is the last linker script (otherwise might cause problems with flip-link)

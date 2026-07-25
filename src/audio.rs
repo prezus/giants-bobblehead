@@ -1,8 +1,8 @@
 //! I2S audio playback to the MAX98357A amplifier.
 //!
 //! Clips live in flash, which the DMA engine can't read, so we stream each clip
-//! through a RAM DMA buffer. The MAX98357A takes a standard stereo I2S stream,
-//! so we expand our mono clips to stereo on the fly (same sample in L and R).
+//! through a RAM DMA buffer. The MAX98357A takes a standard stereo I2S stream, so
+//! mono clips are expanded to stereo on the fly by [`crate::pcm`].
 //!
 //! Playback uses one **continuous (circular) DMA transfer** for the whole awake
 //! session rather than a fresh transfer per clip. One-shot-per-chunk hangs on
@@ -16,28 +16,8 @@ use esp_hal::Async;
 use esp_hal::gpio::Input;
 use esp_hal::i2s::master::I2sTx;
 
-/// Debounce window after a button press before we watch for the next one, so
-/// contact bounce doesn't skip several clips at once.
-const DEBOUNCE_MS: u64 = 40;
-
-/// Fill `buf` with stereo frames expanded from mono `pcm` starting at mono
-/// sample `sample`. Returns the number of bytes written (whole frames only).
-fn fill_stereo(buf: &mut [u8], pcm: &[u8], sample: usize) -> usize {
-    let total_samples = pcm.len() / 2;
-    let frames = buf.len() / 4; // 4 bytes per stereo 16-bit frame
-    let n = core::cmp::min(frames, total_samples - sample);
-    for i in 0..n {
-        let src = (sample + i) * 2;
-        let lo = pcm[src];
-        let hi = pcm[src + 1];
-        let dst = i * 4;
-        buf[dst] = lo; // left  low byte
-        buf[dst + 1] = hi; // left  high byte
-        buf[dst + 2] = lo; // right low byte
-        buf[dst + 3] = hi; // right high byte
-    }
-    n * 4
-}
+use crate::board::DEBOUNCE_MS;
+use crate::pcm::{BYTES_PER_FRAME, fill_stereo, sample_count};
 
 /// Run one awake playback session on a single continuous DMA transfer.
 ///
@@ -69,7 +49,7 @@ pub async fn session(
 
     let mut pcm = first;
     loop {
-        let total_samples = pcm.len() / 2;
+        let total_samples = sample_count(pcm);
         let mut sample = 0usize;
 
         // Stream this clip, but let a button press cut it short. `select` polls
@@ -79,7 +59,14 @@ pub async fn session(
         let stream = async {
             while sample < total_samples {
                 match xfer.push_with(|buf| fill_stereo(buf, pcm, sample)).await {
-                    Ok(n) => sample += n / 4, // bytes / 4 = frames = mono samples
+                    // No progress possible — bail rather than spin without
+                    // yielding, which would hang the executor.
+                    Ok(0) => {
+                        log::warn!("i2s push made no progress at sample {sample}");
+                        break;
+                    }
+                    // One frame written == one mono sample consumed.
+                    Ok(n) => sample += n / BYTES_PER_FRAME,
                     Err(e) => {
                         log::warn!("i2s push failed at sample {sample}: {e:?}");
                         break;
@@ -91,6 +78,10 @@ pub async fn session(
         if let Either::First(()) = select(stream, button.wait_for_falling_edge()).await {
             // Clip played out on its own. Push one buffer of silence so the
             // circular DMA doesn't loop the tail, then return to deep-sleep.
+            //
+            // This waits for a full buffer to drain — about 360 ms at
+            // `DMA_BUF_BYTES` — which dominates `AMP_TAIL_MS` and is the bulk of
+            // the awake time after the audio itself finishes.
             let mut flushed = 0usize;
             while flushed < buf_len {
                 match xfer
@@ -101,6 +92,8 @@ pub async fn session(
                     })
                     .await
                 {
+                    // As in the streaming loop: no progress means stop, not spin.
+                    Ok(0) => break,
                     Ok(n) => flushed += n,
                     Err(_) => break,
                 }

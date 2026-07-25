@@ -2,6 +2,10 @@
 #
 # Every recipe sources the Espressif toolchain env (~/export-esp.sh) so the
 # xtensa-esp32-elf-gcc linker is on PATH — no need to source it in your shell.
+#
+# Note on comments: `just --list` shows only the LAST comment line above a
+# recipe, so each recipe below keeps its summary on a single final line and puts
+# any detail above a blank line.
 
 # Sourced before each cargo/espflash invocation.
 esp := ". ~/export-esp.sh"
@@ -9,6 +13,11 @@ esp := ". ~/export-esp.sh"
 # Firmware paths.
 elf_debug   := "target/xtensa-esp32-none-elf/debug/giants-bobblehead"
 elf_release := "target/xtensa-esp32-none-elf/release/giants-bobblehead"
+
+# Host-testable modules. These are compiled standalone by `just test`, which
+# only works while they have no `use crate::...` imports and no esp-hal
+# dependency. Adding either breaks the recipe — see src/lib.rs.
+host_test_modules := "battery pcm selection"
 
 # Show available recipes.
 default:
@@ -30,12 +39,23 @@ check:
 clippy:
     {{esp}} && cargo clippy
 
-# Run the host-side tests for the pure battery policy module. The firmware
-# target is no_std and has no Rust test harness, so compile this module alone.
-test-battery:
-    mkdir -p target
-    rustc +stable --test src/battery.rs -o target/battery-tests
-    target/battery-tests
+# Lint plus host tests — run before committing.
+verify: clippy test
+
+# `cargo test` can't work here: the default target is xtensa and the firmware is
+# no_std with no test harness. Instead the pure modules are compiled standalone
+# against std, at the same edition as the crate.
+#
+# Run the host-side unit tests.
+test:
+    #!/usr/bin/env sh
+    set -e
+    mkdir -p target/host-tests
+    for m in {{host_test_modules}}; do
+        echo "--- $m ---"
+        rustc +stable --edition 2024 --test "src/$m.rs" -o "target/host-tests/$m"
+        "target/host-tests/$m"
+    done
 
 # Flash release build to the ESP32 over USB and open the serial monitor.
 flash:
@@ -53,16 +73,18 @@ monitor:
 size: build-release
     {{esp}} && xtensa-esp32-elf-size {{elf_release}}
 
-# Preview a converted clip on your computer, e.g. `just play pine`.
 # Raw PCM has no header, so ffmpeg wraps it (mono s16le @ 22050 Hz) into a WAV
 # that macOS's afplay can play — quiet, no progress spam.
+#
+# Preview a converted clip, e.g. `just play izzy-pine`.
 play name:
     #!/usr/bin/env sh
     set -e
-    tmp="$(mktemp -t gb_play).wav"
-    ffmpeg -hide_banner -v error -y -f s16le -ar 22050 -ac 1 -i "assets/{{name}}.pcm" "$tmp"
-    afplay "$tmp"
-    rm -f "$tmp"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    ffmpeg -hide_banner -v error -y -f s16le -ar 22050 -ac 1 \
+        -i "assets/{{name}}.pcm" "$tmp/clip.wav"
+    afplay "$tmp/clip.wav"
 
 # Regenerate PCM clips from the MP3 sources (mono, s16le, 22050 Hz).
 convert:
