@@ -247,8 +247,8 @@ only give the app about 1 MB, which is why the custom table exists; the cargo
 runner passes it automatically.
 
 Each second of audio is ~44 KB and the code is well under 100 KB, so the ceiling
-is roughly **135 seconds of audio in total**. The three clips currently shipped
-use about 77 s (~3.3 MB), leaving ~58 s of headroom. Keep individual clips to a
+is roughly **140 seconds of audio in total**. The three clips currently shipped
+use about 77 s (~3.3 MB), leaving ~60 s of headroom. Keep individual clips to a
 few seconds — a bobblehead that talks for 40 seconds is a bobblehead nobody
 presses twice.
 

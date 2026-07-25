@@ -11,7 +11,7 @@
 //! Clips are linked into the app image, which lives in the **6 MB** `factory`
 //! partition (see `partitions.csv`) — *not* the full 8 MB of flash. Each second
 //! of audio is ~44 KB, and the code itself is well under 100 KB, so the practical
-//! ceiling is about **135 seconds of audio in total**. `just size` reports what
+//! ceiling is about **140 seconds of audio in total**. `just size` reports what
 //! the current build uses.
 //!
 //! The picking logic lives in [`crate::selection`], which is kept pure so it can

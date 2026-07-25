@@ -60,20 +60,24 @@ where
     let mut sum = 0u32;
     let mut taken = 0u32;
     for _ in 0..battery::SAMPLE_COUNT {
-        match nb::block!(adc.read_oneshot(pin)) {
-            Ok(raw) => {
-                sum += u32::from(raw);
-                taken += 1;
-            }
-            Err(()) => log::warn!("battery ADC conversion failed"),
+        if let Ok(raw) = nb::block!(adc.read_oneshot(pin)) {
+            sum += u32::from(raw);
+            taken += 1;
         }
+    }
+
+    // One summary rather than a warning per failed conversion, so a totally dead
+    // ADC produces a single log line instead of `SAMPLE_COUNT` identical ones.
+    if taken < battery::SAMPLE_COUNT {
+        log::warn!(
+            "battery: {} of {} ADC conversions failed",
+            battery::SAMPLE_COUNT - taken,
+            battery::SAMPLE_COUNT
+        );
     }
 
     if taken == 0 {
         return None;
-    }
-    if taken < battery::SAMPLE_COUNT {
-        log::warn!("battery: only {taken}/{} samples read", battery::SAMPLE_COUNT);
     }
     Some(Reading::from_raw((sum / taken) as u16, full_scale_mv))
 }
@@ -126,22 +130,22 @@ async fn main(_spawner: Spawner) -> ! {
 
     let battery = sample_battery(&mut adc, &mut battery_pin, full_scale_mv);
     match battery {
-        Some(reading) => info!(
-            "battery: ~{} mV (raw {}, {:?})",
-            reading.millivolts, reading.raw, reading.state
-        ),
-        None => log::warn!("battery: no ADC samples; assuming USB power"),
-    }
-    match battery.map(|r| r.state) {
-        Some(State::NotPresent) | None => {
-            info!("no battery voltage detected; assuming USB power")
+        None => log::warn!("battery: no usable ADC reading; assuming USB power"),
+        Some(reading) => {
+            info!(
+                "battery: ~{} mV (raw {}, {:?})",
+                reading.millivolts, reading.raw, reading.state
+            );
+            match reading.state {
+                State::NotPresent => info!("no battery voltage detected; assuming USB power"),
+                State::Critical => log::warn!(
+                    "battery below {} mV; skipping audio until recharged",
+                    battery::CRITICAL_MV
+                ),
+                State::Low => log::warn!("battery below {} mV; charge soon", battery::LOW_MV),
+                State::Normal => {}
+            }
         }
-        Some(State::Critical) => log::warn!(
-            "battery below {} mV; skipping audio until recharged",
-            battery::CRITICAL_MV
-        ),
-        Some(State::Low) => log::warn!("battery below {} mV; charge soon", battery::LOW_MV),
-        Some(State::Normal) => {}
     }
 
     // A failed read shouldn't brick the soundboard; treat it as USB power.
