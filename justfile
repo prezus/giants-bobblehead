@@ -11,7 +11,6 @@
 esp := ". ~/export-esp.sh"
 
 # Firmware paths.
-elf_debug   := "target/xtensa-esp32-none-elf/debug/giants-bobblehead"
 elf_release := "target/xtensa-esp32-none-elf/release/giants-bobblehead"
 
 # Host-testable modules. These are compiled standalone by `just test`, which
@@ -37,10 +36,14 @@ check:
 
 # Lint with clippy.
 clippy:
-    {{esp}} && cargo clippy
+    {{esp}} && cargo clippy -- -D warnings
 
-# Lint plus host tests — run before committing.
-verify: clippy test
+# Check formatting without changing files.
+fmt-check:
+    cargo fmt --all -- --check
+
+# Formatting, lint, host tests, and a release link — run before committing.
+verify: fmt-check clippy test build-release
 
 # `cargo test` can't work here: the default target is xtensa and the firmware is
 # no_std with no test harness. Instead the pure modules are compiled standalone
@@ -80,10 +83,17 @@ size: build-release
 play name:
     #!/usr/bin/env sh
     set -e
+    name={{quote(name)}}
+    case "$name" in
+        ""|*[!a-z0-9-]*)
+            echo "clip name must contain only lowercase letters, digits, and hyphens" >&2
+            exit 2
+            ;;
+    esac
     tmp="$(mktemp -d)"
     trap 'rm -rf "$tmp"' EXIT
     ffmpeg -hide_banner -v error -y -f s16le -ar 22050 -ac 1 \
-        -i "assets/{{name}}.pcm" "$tmp/clip.wav"
+        -i "assets/$name.pcm" "$tmp/clip.wav"
     afplay "$tmp/clip.wav"
 
 # Regenerate PCM clips from the MP3 sources (mono, s16le, 22050 Hz).

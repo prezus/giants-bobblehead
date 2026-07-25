@@ -17,6 +17,8 @@
 //! The picking logic lives in [`crate::selection`], which is kept pure so it can
 //! be host-tested; this module owns the storage it reads from.
 
+use portable_atomic::{AtomicU32, Ordering};
+
 use crate::selection;
 
 /// One embedded sound bite: a name (for logging) and its raw PCM bytes.
@@ -101,30 +103,32 @@ const fn str_eq(a: &str, b: &str) -> bool {
 /// press replays [`FIRST_BOOT`]. `esp-hal` is pinned exactly in `Cargo.toml` for
 /// this reason; re-test "press twice, hear two different clips" after any bump.
 #[esp_hal::ram(unstable(rtc_fast, persistent))]
-static mut LAST_CLIP: u32 = 0;
+static LAST_CLIP: AtomicU32 = AtomicU32::new(0);
 
 /// The index of the clip that played most recently, or `None` after a power-on.
 #[must_use]
 pub fn last_played() -> Option<usize> {
-    // SAFETY: single-threaded access from `main` only, and a plain `u32` read by
-    // value — no reference to the `static mut` is created.
-    let stored = unsafe { LAST_CLIP };
+    let stored = LAST_CLIP.load(Ordering::Relaxed);
     selection::decode_last(stored, COUNT)
 }
 
 /// Record `index` as the most recently played clip.
 pub fn set_last_played(index: usize) {
-    // SAFETY: as `last_played` — single-threaded, by-value write.
-    unsafe { LAST_CLIP = selection::encode_last(index) };
+    LAST_CLIP.store(selection::encode_last(index), Ordering::Relaxed);
 }
 
 /// Pick the next clip, avoiding an immediate repeat, and record the choice.
 ///
 /// `entropy` should be freshly random on each call.
 pub fn advance(entropy: u32) -> &'static Clip {
-    // SAFETY: as `last_played` — single-threaded, by-value read.
-    let stored = unsafe { LAST_CLIP };
-    let index = selection::pick_next(stored, entropy, COUNT);
-    set_last_played(index);
-    &CLIPS[index]
+    let mut stored = LAST_CLIP.load(Ordering::Relaxed);
+    loop {
+        let index = selection::pick_next(stored, entropy, COUNT);
+        let encoded = selection::encode_last(index);
+        match LAST_CLIP.compare_exchange_weak(stored, encoded, Ordering::Relaxed, Ordering::Relaxed)
+        {
+            Ok(_) => return &CLIPS[index],
+            Err(current) => stored = current,
+        }
+    }
 }

@@ -49,7 +49,7 @@
 //! The Feather's built-in two-resistor divider connects BAT/2 to **GPIO35
 //! (ADC1)**. Firmware averages that input at boot, warns below 3.6 V, and skips
 //! audio below 3.4 V. No external monitor wiring is required. The conversion
-//! needs calibration — see [`crate::battery`] and the README.
+//! needs hardware validation — see [`crate::battery`] and the README.
 
 /// Playback sample rate (Hz). All embedded clips MUST be mono, 16-bit signed,
 /// little-endian PCM at this rate. See [`crate::clips`].
@@ -63,6 +63,10 @@ pub const SAMPLE_RATE: u32 = 22_050;
 /// 360 ms of audio, which sets how long a clip keeps playing after a press
 /// interrupts it, and how long the flush at the end of a session takes.
 pub const DMA_BUF_BYTES: usize = 32_000;
+const _: () = assert!(
+    DMA_BUF_BYTES.is_multiple_of(crate::pcm::BYTES_PER_FRAME),
+    "DMA_BUF_BYTES must contain whole stereo frames"
+);
 
 /// Milliseconds to wait after enabling the amplifier before streaming audio.
 pub const AMP_SETTLE_MS: u64 = 5;

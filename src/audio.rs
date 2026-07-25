@@ -52,32 +52,39 @@ pub async fn session(
         let total_samples = sample_count(pcm);
         let mut sample = 0usize;
 
-        // Stream this clip, but let a button press cut it short. `select` polls
-        // both: the press fires independently of `available()`, so interrupts
-        // are near-instant (only the ~one-buffer of already-queued audio still
-        // plays out before the next clip is heard).
-        let stream = async {
+        // Stream and drain this clip as one future so the same button wait stays
+        // armed throughout; cancelling and recreating an edge wait between
+        // those phases could miss a press in the hand-off.
+        let play_and_flush = async {
             while sample < total_samples {
-                match xfer.push_with(|buf| fill_stereo(buf, pcm, sample)).await {
+                let mut audio_bytes = 0usize;
+                match xfer
+                    .push_with(|buf| {
+                        audio_bytes = fill_stereo(buf, pcm, sample);
+                        // `esp-hal` 1.1.1 returns whole descriptors to circular
+                        // DMA even for a partial callback write. `fill_stereo`
+                        // has padded the remainder with silence, so commit the
+                        // whole slice and track audio progress separately.
+                        buf.len()
+                    })
+                    .await
+                {
                     // No progress possible — bail rather than spin without
                     // yielding, which would hang the executor.
-                    Ok(0) => {
+                    Ok(_) if audio_bytes == 0 => {
                         log::warn!("i2s push made no progress at sample {sample}");
                         break;
                     }
                     // One frame written == one mono sample consumed.
-                    Ok(n) => sample += n / BYTES_PER_FRAME,
+                    Ok(_) => sample += audio_bytes / BYTES_PER_FRAME,
                     Err(e) => {
                         log::warn!("i2s push failed at sample {sample}: {e:?}");
                         break;
                     }
                 }
             }
-        };
 
-        if let Either::First(()) = select(stream, button.wait_for_falling_edge()).await {
-            // Clip played out on its own. Push one buffer of silence so the
-            // circular DMA doesn't loop the tail, then return to deep-sleep.
+            // Push one buffer of silence so circular DMA cannot loop the tail.
             //
             // This waits for a full buffer to drain — about 360 ms at
             // `DMA_BUF_BYTES` — which dominates `AMP_TAIL_MS` and is the bulk of
@@ -86,9 +93,8 @@ pub async fn session(
             while flushed < buf_len {
                 match xfer
                     .push_with(|buf| {
-                        let n = core::cmp::min(buf.len(), buf_len - flushed);
-                        buf[..n].fill(0);
-                        n
+                        buf.fill(0);
+                        buf.len()
                     })
                     .await
                 {
@@ -98,6 +104,11 @@ pub async fn session(
                     Err(_) => break,
                 }
             }
+        };
+
+        // The press fires independently of DMA availability, so interrupts are
+        // near-instant apart from already-queued audio.
+        if let Either::First(()) = select(play_and_flush, button.wait_for_falling_edge()).await {
             return;
         }
 

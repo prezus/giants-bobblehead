@@ -40,16 +40,23 @@ use giants_bobblehead::clips;
 // This creates a default app-descriptor required by the esp-idf bootloader.
 esp_bootloader_esp_idf::esp_app_desc!();
 
+/// Result of one boot-time battery sampling pass.
+struct BatterySample {
+    reading: Option<Reading>,
+    failed_conversions: u32,
+}
+
 /// Average `battery::SAMPLE_COUNT` conversions from the BAT/2 divider.
 ///
 /// Failed conversions are skipped rather than folded in as zero, which would drag
-/// a healthy battery toward `Critical` and silently disable audio. Returns `None`
-/// if every conversion failed.
+/// a healthy battery toward `Critical` and silently disable audio. The returned
+/// sample also records how many conversions failed so the caller can emit one
+/// complete status line.
 fn sample_battery<'d, PIN, ADCI>(
     adc: &mut Adc<'d, ADCI, esp_hal::Blocking>,
     pin: &mut esp_hal::analog::adc::AdcPin<PIN, ADCI>,
-    full_scale_mv: u32,
-) -> Option<Reading>
+    calibration: battery::Calibration,
+) -> BatterySample
 where
     PIN: esp_hal::analog::adc::AdcChannel,
     ADCI: esp_hal::analog::adc::RegisterAccess + 'd,
@@ -66,20 +73,12 @@ where
         }
     }
 
-    // One summary rather than a warning per failed conversion, so a totally dead
-    // ADC produces a single log line instead of `SAMPLE_COUNT` identical ones.
-    if taken < battery::SAMPLE_COUNT {
-        log::warn!(
-            "battery: {} of {} ADC conversions failed",
-            battery::SAMPLE_COUNT - taken,
-            battery::SAMPLE_COUNT
-        );
+    BatterySample {
+        reading: sum
+            .checked_div(taken)
+            .map(|average| Reading::from_raw(average as u16, calibration)),
+        failed_conversions: battery::SAMPLE_COUNT - taken,
     }
-
-    if taken == 0 {
-        return None;
-    }
-    Some(Reading::from_raw((sum / taken) as u16, full_scale_mv))
 }
 
 #[esp_rtos::main]
@@ -116,40 +115,91 @@ async fn main(_spawner: Spawner) -> ! {
     let mut amp_sd = Output::new(peripherals.GPIO33, Level::Low, OutputConfig::default());
 
     // --- Battery monitor (GPIO35 = BAT/2, ADC1 channel 7) ---
-    // The classic ESP32 has no HAL calibration curve, so derive the ADC's
-    // full-scale voltage from this chip's own reference voltage in eFuse. A chip
-    // with nothing burned reads 0, which decodes to the nominal 1100 mV.
+    // `esp-hal` does not expose the classic ESP32 calibration curve. Port
+    // Espressif's ADC1 11 dB line fit here: prefer two-point eFuse data, then
+    // fall back to the chip Vref (or nominal 1100 mV when Vref is unburned).
     let vref_code: u8 = efuse::read_field_le(efuse::ADC_VREF);
     let vref_mv = battery::vref_from_efuse(vref_code);
-    let full_scale_mv = battery::full_scale_mv(vref_mv);
-    info!("adc: vref {vref_mv} mV (efuse {vref_code:#x}), full scale {full_scale_mv} mV");
+    let block3_reserved: u8 = efuse::read_field_le(efuse::BLK3_PART_RESERVE);
+    let adc1_tp_low: u8 = efuse::read_field_le(efuse::ADC1_TP_LOW);
+    let adc1_tp_high: u16 = efuse::read_field_le(efuse::ADC1_TP_HIGH);
+    let adc2_tp_low: u8 = efuse::read_field_le(efuse::ADC2_TP_LOW);
+    let adc2_tp_high: u16 = efuse::read_field_le(efuse::ADC2_TP_HIGH);
+    let two_point_present = block3_reserved != 0
+        && adc1_tp_low != 0
+        && adc1_tp_high != 0
+        && adc2_tp_low != 0
+        && adc2_tp_high != 0;
+    let (calibration, calibration_source) = if two_point_present {
+        match battery::Calibration::from_two_point(adc1_tp_low, adc1_tp_high) {
+            Some(calibration) => (calibration, "two-point eFuse"),
+            None => (battery::Calibration::from_vref(vref_mv), "Vref fallback"),
+        }
+    } else {
+        (battery::Calibration::from_vref(vref_mv), "Vref")
+    };
+    info!(
+        "adc: {calibration_source} calibration, vref {vref_mv} mV, coefficients ({}, {})",
+        calibration.coefficient_a, calibration.coefficient_b
+    );
 
     let mut adc_config = AdcConfig::new();
     let mut battery_pin = adc_config.enable_pin(peripherals.GPIO35, Attenuation::_11dB);
     let mut adc = Adc::new(peripherals.ADC1, adc_config);
 
-    let battery = sample_battery(&mut adc, &mut battery_pin, full_scale_mv);
-    match battery {
-        None => log::warn!("battery: no usable ADC reading; assuming USB power"),
-        Some(reading) => {
-            info!(
-                "battery: ~{} mV (raw {}, {:?})",
-                reading.millivolts, reading.raw, reading.state
+    let battery = sample_battery(&mut adc, &mut battery_pin, calibration);
+    let allows_playback = match battery.reading {
+        None => {
+            log::warn!(
+                "battery: all {} ADC conversions failed; skipping audio",
+                battery::SAMPLE_COUNT
             );
-            match reading.state {
-                State::NotPresent => info!("no battery voltage detected; assuming USB power"),
-                State::Critical => log::warn!(
-                    "battery below {} mV; skipping audio until recharged",
-                    battery::CRITICAL_MV
-                ),
-                State::Low => log::warn!("battery below {} mV; charge soon", battery::LOW_MV),
-                State::Normal => {}
-            }
+            false
         }
-    }
-
-    // A failed read shouldn't brick the soundboard; treat it as USB power.
-    let allows_playback = battery.is_none_or(|r| r.state.allows_playback());
+        Some(reading) => {
+            match reading.state {
+                State::NotPresent => {
+                    info!(
+                        "battery: ~{} mV (raw {}, {}/{} conversions failed); assuming USB power",
+                        reading.millivolts,
+                        reading.raw,
+                        battery.failed_conversions,
+                        battery::SAMPLE_COUNT
+                    );
+                }
+                State::Critical => {
+                    log::warn!(
+                        "battery: ~{} mV (raw {}, {}/{} conversions failed); below {} mV, skipping audio",
+                        reading.millivolts,
+                        reading.raw,
+                        battery.failed_conversions,
+                        battery::SAMPLE_COUNT,
+                        battery::CRITICAL_MV
+                    );
+                }
+                State::Low => {
+                    log::warn!(
+                        "battery: ~{} mV (raw {}, {}/{} conversions failed); below {} mV, charge soon",
+                        reading.millivolts,
+                        reading.raw,
+                        battery.failed_conversions,
+                        battery::SAMPLE_COUNT,
+                        battery::LOW_MV
+                    );
+                }
+                State::Normal => {
+                    info!(
+                        "battery: ~{} mV (raw {}, {}/{} conversions failed); normal",
+                        reading.millivolts,
+                        reading.raw,
+                        battery.failed_conversions,
+                        battery::SAMPLE_COUNT
+                    );
+                }
+            }
+            reading.state.allows_playback()
+        }
+    };
 
     let mut button_pin = peripherals.GPIO27;
     if allows_playback {
@@ -220,11 +270,24 @@ async fn main(_spawner: Spawner) -> ! {
     }
 
     // --- Deep sleep until the next press ---
-    // ext0 wakes on GPIO27's falling edge. Internal pulls don't hold reliably
-    // through deep sleep, so also fit an external 10 kΩ from GPIO27 to 3V3 (see
-    // board.rs).
-    let ext0 = Ext0WakeupSource::new(button_pin, WakeupLevel::Low);
+    // ext0 wakes while GPIO27 is low. Internal pulls don't hold reliably through
+    // deep sleep, so also fit an external 10 kΩ from GPIO27 to 3V3 (see
+    // board.rs). Entering sleep while the active-low button is still held would
+    // immediately wake and reboot the board. Flush logs first, then make the
+    // release check the final action before arming ext0.
     info!("sleeping — press the button to play");
     Delay::new().delay_millis(PRE_SLEEP_FLUSH_MS);
+    {
+        let mut button = Input::new(
+            button_pin.reborrow(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        if button.is_low() {
+            info!("waiting for button release before sleep");
+            button.wait_for_high().await;
+        }
+    }
+
+    let ext0 = Ext0WakeupSource::new(button_pin, WakeupLevel::Low);
     rtc.sleep_deep(&[&ext0]);
 }

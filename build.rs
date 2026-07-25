@@ -10,7 +10,7 @@ fn main() {
 
 fn linker_be_nice() {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
+    if args.len() >= 3 {
         let kind = &args[1];
         let what = &args[2];
 

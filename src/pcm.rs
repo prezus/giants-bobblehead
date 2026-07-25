@@ -21,8 +21,9 @@ pub const fn sample_count(pcm: &[u8]) -> usize {
 }
 
 /// Fill `buf` with stereo frames expanded from mono `pcm`, starting at mono
-/// sample `sample`. Returns the number of bytes written, always a whole number
-/// of frames.
+/// sample `sample`. Any part of `buf` beyond the clip is filled with silence.
+/// Returns the number of bytes containing audio, always a whole number of
+/// frames.
 ///
 /// Returns 0 once `sample` reaches the end of `pcm`, or if `buf` cannot hold a
 /// whole frame. Callers must treat 0 as "stop", never as "retry" — a retry loop
@@ -55,7 +56,9 @@ pub fn fill_stereo(buf: &mut [u8], pcm: &[u8], sample: usize) -> usize {
         buf[dst + 3] = hi; // right high byte
     }
 
-    n * BYTES_PER_FRAME
+    let audio_bytes = n * BYTES_PER_FRAME;
+    buf[audio_bytes..].fill(0);
+    audio_bytes
 }
 
 #[cfg(test)]
@@ -94,18 +97,18 @@ mod tests {
     }
 
     #[test]
-    fn stops_at_the_end_of_the_clip() {
+    fn pads_the_end_of_the_clip_with_silence() {
         let mut buf = [0xAAu8; 16];
         // Only two samples available, so only two frames written.
         assert_eq!(fill_stereo(&mut buf, MONO, 0), 8);
-        // Remainder is left untouched for the caller to handle.
-        assert_eq!(&buf[8..], &[0xAA; 8]);
+        assert_eq!(&buf[8..], &[0; 8]);
     }
 
     #[test]
     fn returns_zero_when_the_clip_is_exhausted() {
-        let mut buf = [0u8; 8];
+        let mut buf = [0xAAu8; 8];
         assert_eq!(fill_stereo(&mut buf, MONO, 2), 0);
+        assert_eq!(buf, [0; 8]);
     }
 
     /// Guards the spin-forever bug: an offset past the end must not underflow

@@ -1,7 +1,7 @@
 //! Which clip to play next.
 //!
 //! Kept free of `esp-hal` and of crate-internal imports so it can be unit-tested
-//! on the host — see `just test-selection`. The RTC-persistent storage this
+//! on the host — see `just test`. The RTC-persistent storage this
 //! feeds from lives in [`crate::clips`].
 //!
 //! The "last played" value is stored biased by one so that zero can mean "no

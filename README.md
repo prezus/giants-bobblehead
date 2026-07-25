@@ -7,8 +7,8 @@ LiPo at boot, and shuts down the amplifier between plays.
 
 > **Status: not yet validated on hardware.** The firmware builds and its pure
 > logic is unit-tested, but the assembled device has not been bench-tested. In
-> particular the ADC voltage scale needs calibrating against a multimeter before
-> the battery thresholds mean anything — see
+> particular the ported ADC calibration must be checked against a multimeter
+> before relying on the battery thresholds — see
 > [Battery monitoring](#charging-and-battery-monitoring) and
 > [Hardware validation still required](#hardware-validation-still-required).
 
@@ -80,53 +80,45 @@ applies this policy:
 
 | Approximate battery voltage | Behavior |
 |-----------------------------|----------|
-| Below 2.5 V | Treat as no battery / USB-only operation, play normally |
-| 2.5–3.4 V | Log a critical warning, skip audio, return to sleep |
+| Below 1.0 V | Treat as no battery / USB-only operation, play normally |
+| 1.0–3.4 V | Log a critical warning, skip audio, return to sleep |
 | 3.4–3.6 V | Play normally and log a charge-soon warning |
 | 3.6 V and above | Play normally |
 
-Note the first row: a reading that low cannot be a working battery, so the
-firmware assumes USB is supplying the current and allows playback. That means
-the policy is **not monotonic** — a collapsed cell reads as "USB" and plays,
-while a merely low one refuses. This is deliberate, so that a board with no
-battery fitted still works.
+The no-battery threshold is deliberately far below any plausible LiPo voltage.
+A collapsed cell in the 1.0–3.4 V range therefore fails closed instead of being
+mistaken for USB power. If every ADC conversion fails, playback is also skipped;
+a USB-only board with a working monitor still reads near zero and plays.
 
 #### Calibrating the voltage scale
 
 **This is the one step you must do before trusting any of the thresholds above.**
 
-`esp-hal` provides no ADC calibration curve for the original ESP32 (only for the
-S2/S3 and RISC-V parts), so `src/battery.rs` derives the ADC's full-scale voltage
-from the chip's own reference voltage, read from the eFuse `ADC_VREF` field, times
-the nominal 11 dB attenuation ratio. That gets the scale into the right
-neighbourhood but not better than about ±10%: Espressif originally called this
-attenuation setting 11 dB and later relabelled the identical hardware 12 dB, and
-per-chip spread widens the band further.
+`esp-hal` provides no ADC calibration curve for the original ESP32, so
+`src/battery.rs` ports Espressif's ADC1 11 dB line-fitting model. It prefers the
+chip's two-point eFuse calibration when present; otherwise it uses the eFuse
+`ADC_VREF` value, or the nominal 1100 mV fallback. Unlike an ideal attenuation
+ratio, this model includes the measured slope and non-zero intercept.
 
 To calibrate, flash and watch the log:
 
 ```
-adc: vref 1100 mV (efuse 0x0), full scale 3902 mV
-battery: ~4120 mV (raw 2161, Normal)
+adc: Vref calibration, vref 1100 mV, coefficients (52798, 142)
+battery: ~4200 mV (raw 2430, 0/16 conversions failed); normal
 ```
 
-Measure BAT with a multimeter and compare. If they disagree, compute the true
-full scale and put it in `battery.rs`:
+Measure BAT with a multimeter and compare. If a board still needs a one-point
+correction, keep the logged intercept and solve the fixed-point slope:
 
 ```
-full_scale_mv = measured_mV * 4095 / (raw * 2)
+coefficient_a = ((measured_BAT_mV / 2 - coefficient_b) * 65536) / raw
 ```
 
-Then replace the `full_scale_mv(vref_mv)` call in `src/bin/main.rs` with your
-measured constant, or scale `ATTEN_11DB_RATIO_MILLI` to match. Re-run
-`just test` afterwards — the tests derive their raw codes from the same constant
-and will follow automatically.
-
-> Take the figure from the ADC's **full-scale** voltage — the input that would
-> produce code 4095 — not from Espressif's *recommended input range* ceiling
-> (2450 mV at this attenuation). Those are different numbers, and using the
-> latter under-reads by about 20%, which is enough to classify a fully charged
-> cell as `Critical` and refuse to play.
+Override the selected `battery::Calibration` in `src/bin/main.rs` with the
+measured coefficient. For higher confidence, measure several points across
+3.2–4.2 V and verify the line rather than fitting a single sample. The host
+tests use independent Espressif reference vectors, so do not rewrite those
+vectors to make a board-specific correction pass.
 
 The reading is also taken **before** the amplifier is enabled, so it is an
 open-circuit voltage. The MAX98357A draws close to 900 mA at peak, which on a
@@ -248,14 +240,14 @@ runner passes it automatically.
 
 Each second of audio is ~44 KB and the code is well under 100 KB, so the ceiling
 is roughly **140 seconds of audio in total**. The three clips currently shipped
-use about 77 s (~3.3 MB), leaving ~60 s of headroom. Keep individual clips to a
-few seconds — a bobblehead that talks for 40 seconds is a bobblehead nobody
-presses twice.
+use about 77 s (~3.3 MB), leaving ~60 s of headroom. `bonds` and `bumgarner` are
+long highlight calls at roughly 40 s and 33 s; trim them if hardware testing
+shows that awake-time, battery-life, or interaction latency is unacceptable.
 
 ## Hardware validation still required
 
-- **Calibrate the ADC**: compare the logged GPIO35 voltage with a multimeter and
-  set the full scale accordingly (see
+- **Validate the ADC calibration**: compare the logged GPIO35 voltage with a
+  multimeter and adjust the line-fit coefficient if needed (see
   [Calibrating the voltage scale](#calibrating-the-voltage-scale)). Until this is
   done the battery thresholds are guesses.
 - **Confirm no-repeat selection survives deep sleep**: press twice, check the log

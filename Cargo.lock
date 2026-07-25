@@ -940,6 +940,7 @@ dependencies = [
  "esp-rtos",
  "log",
  "nb 1.1.0",
+ "portable-atomic",
 ]
 
 [[package]]

@@ -30,6 +30,7 @@ embassy-time = { version = "0.5.0", features = ["log"] }
 embassy-futures = "0.1.1"
 esp-alloc = "0.10.0"
 nb = "1.1.0"
+portable-atomic = { version = "1.11", default-features = false }
 esp-backtrace = { version = "0.19.0", features = [
   "esp32",
   "panic-handler",
