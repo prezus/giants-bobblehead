@@ -158,15 +158,6 @@ async fn main(_spawner: Spawner) -> ! {
         }
         Some(reading) => {
             match reading.state {
-                State::NotPresent => {
-                    info!(
-                        "battery: ~{} mV (raw {}, {}/{} conversions failed); assuming USB power",
-                        reading.millivolts,
-                        reading.raw,
-                        battery.failed_conversions,
-                        battery::SAMPLE_COUNT
-                    );
-                }
                 State::Critical => {
                     log::warn!(
                         "battery: ~{} mV (raw {}, {}/{} conversions failed); below {} mV, skipping audio",

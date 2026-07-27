@@ -50,6 +50,20 @@
 //! (ADC1)**. Firmware averages that input at boot, warns below 3.6 V, and skips
 //! audio below 3.4 V. No external monitor wiring is required. The conversion
 //! needs hardware validation — see [`crate::battery`] and the README.
+//!
+//! **The pin reads the BAT node, which is also the charger output.** With USB-C
+//! connected it shows the cell under charge rather than at rest, and with no
+//! cell fitted it floats near the charger's regulation point — measured at about
+//! 4110 mV on this board, not zero. The Feather V2 brings out no USB-presence or
+//! charge-status GPIO (the `CHG` LED is not routed to a pin), so telling
+//! "charging" from "on battery" would need the header's `USB` (VBUS) pin sensed
+//! through a divider into a spare input.
+//!
+//! ## JST battery polarity
+//! **Meter the cell before first connection.** Third-party LiPo packs are often
+//! crimped opposite to Adafruit's convention — the Qimoo 503450 used in this
+//! build shipped reversed, and had to be re-pinned. Symptom of a reversed pack:
+//! charges and runs normally on USB-C, but will not boot on battery alone.
 
 /// Playback sample rate (Hz). All embedded clips MUST be mono, 16-bit signed,
 /// little-endian PCM at this rate. See [`crate::clips`].

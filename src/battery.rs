@@ -3,6 +3,21 @@
 //! The board connects `BAT` to GPIO35 (ADC1 channel 7) through two 200 kΩ
 //! resistors, so the ADC sees half the battery voltage.
 //!
+//! # This measures the BAT node, not the cell
+//!
+//! `BAT` is also the charger's output. With USB-C connected the two are the same
+//! node, so the reading is the cell's terminal voltage *while under charge* —
+//! inflated above its resting voltage — and with no cell fitted at all it simply
+//! floats near the charger's regulation point. Measured on this board: a Feather
+//! with the battery unplugged and USB connected reads about **4110 mV**, not zero.
+//!
+//! No value on this pin can therefore distinguish "charging cell" from "full
+//! cell" from "no cell". The Feather V2 exposes no GPIO for USB-presence or
+//! charge status — the `CHG` LED is not routed to a pin — so separating those
+//! cases would require sensing the header's `USB` (VBUS) pin through a divider.
+//! Until that exists, treat every threshold below as meaningful only when the
+//! board is running on battery alone.
+//!
 //! # Accuracy and calibration
 //!
 //! The original ESP32 ADC is not an ideal straight line through zero, especially
@@ -63,13 +78,6 @@ const TP_STEP: i32 = 4;
 
 /// The Feather battery monitor divides BAT by two.
 const BATTERY_DIVIDER: u32 = 2;
-
-/// Below this, assume no battery is fitted and the board is running from USB.
-///
-/// Keep this threshold far below any plausible LiPo voltage. Treating every
-/// value below the old 2.5 V threshold as "USB-only" made the policy
-/// non-monotonic and could re-enable playback on a collapsed cell.
-const BATTERY_PRESENT_MIN_MV: u16 = 1000;
 
 /// Skip audio below this voltage to avoid a high-current load on a depleted
 /// LiPo. The Feather/battery protection remains the final safety cutoff.
@@ -169,14 +177,14 @@ fn decode_twos_complement(bits: u32, mask: u32) -> i32 {
 pub const DEFAULT_CALIBRATION: Calibration = Calibration::from_vref(NOMINAL_VREF_MV);
 
 /// Coarse battery condition derived from the boot-time voltage sample.
+///
+/// There is deliberately no "no battery fitted" variant. The pin cannot detect
+/// that case — a batteryless board reads near the charger's regulation point,
+/// not zero — so any implausibly low reading is a fault or a flat cell, and both
+/// are handled by failing closed into [`Self::Critical`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum State {
-    /// GPIO35 does not show a usable battery voltage; assume USB-only power.
-    ///
-    /// This threshold is deliberately far below any plausible LiPo voltage so
-    /// a depleted cell remains `Critical` rather than being mistaken for USB.
-    NotPresent,
-    /// A battery is present but too depleted for the amplifier load.
+    /// Too depleted for the amplifier load, or the monitor is reading a fault.
     Critical,
     /// Playback is allowed, but the battery should be charged soon.
     Low,
@@ -216,9 +224,7 @@ impl Reading {
             scaled as u16
         };
 
-        let state = if millivolts < BATTERY_PRESENT_MIN_MV {
-            State::NotPresent
-        } else if millivolts < CRITICAL_MV {
+        let state = if millivolts < CRITICAL_MV {
             State::Critical
         } else if millivolts < LOW_MV {
             State::Low
@@ -239,23 +245,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classifies_usb_only_reading() {
-        assert_eq!(
-            Reading::from_raw(0, DEFAULT_CALIBRATION).state,
-            State::NotPresent
-        );
-    }
-
-    #[test]
-    fn no_battery_boundary_is_monotonic() {
-        assert_eq!(
-            Reading::from_raw(443, DEFAULT_CALIBRATION).state,
-            State::NotPresent
-        );
-        assert_eq!(
-            Reading::from_raw(444, DEFAULT_CALIBRATION).state,
-            State::Critical
-        );
+    fn playback_permission_is_monotonic_in_voltage() {
+        // Once some reading is allowed, no higher reading may be refused. An
+        // earlier "assume USB power" window below 1.0 V broke this and handed a
+        // flat cell the same verdict as a healthy one.
+        let mut first_allowed = None;
+        for raw in 0..=3000u16 {
+            let allowed = Reading::from_raw(raw, DEFAULT_CALIBRATION)
+                .state
+                .allows_playback();
+            match (allowed, first_allowed) {
+                (true, None) => first_allowed = Some(raw),
+                (false, Some(first)) => {
+                    panic!("raw {raw} refused after raw {first} was allowed")
+                }
+                _ => {}
+            }
+        }
+        assert!(first_allowed.is_some(), "no reading was ever allowed");
     }
 
     #[test]
@@ -267,7 +274,7 @@ mod tests {
     }
 
     #[test]
-    fn does_not_mistake_a_collapsed_cell_for_usb_power() {
+    fn fails_closed_on_a_collapsed_cell() {
         // Raw 1313 is about 2400 mV at BAT: dangerously depleted, but nonzero.
         let reading = Reading::from_raw(1313, DEFAULT_CALIBRATION);
         assert_eq!(reading.state, State::Critical);
@@ -378,12 +385,12 @@ mod tests {
         assert_ne!(positive, negative);
     }
 
-    /// A zero code must not be mistaken for a healthy battery.
+    /// A zero code means a broken monitor, not a USB-powered board: a Feather
+    /// with no cell fitted reads near the charger's regulation point instead.
     #[test]
-    fn treats_zero_code_as_absent() {
-        assert_eq!(
-            Reading::from_raw(0, DEFAULT_CALIBRATION).state,
-            State::NotPresent
-        );
+    fn fails_closed_on_a_zero_code() {
+        let reading = Reading::from_raw(0, DEFAULT_CALIBRATION);
+        assert_eq!(reading.state, State::Critical);
+        assert!(!reading.state.allows_playback());
     }
 }

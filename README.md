@@ -63,8 +63,15 @@ single-cell LiPo.
 
 ### Charging and battery monitoring
 
-Connect a protected 3.7 V LiPo to the Feather's JST socket. The Feather hardware
-automatically:
+Connect a protected 3.7 V LiPo to the Feather's JST socket.
+
+> **Check the pack's polarity with a multimeter first.** Third-party LiPo cells
+> are frequently crimped opposite to Adafruit's convention. The Qimoo 503450 used
+> in this build shipped reversed and had to be re-pinned. A reversed pack charges
+> and runs fine on USB-C but will not boot on battery alone — and can damage the
+> cell. Verify against the socket rather than trusting wire colours.
+
+The Feather hardware automatically:
 
 - powers the board from either USB-C or the battery;
 - charges the battery whenever USB-C is connected; and
@@ -80,15 +87,27 @@ applies this policy:
 
 | Approximate battery voltage | Behavior |
 |-----------------------------|----------|
-| Below 1.0 V | Treat as no battery / USB-only operation, play normally |
-| 1.0–3.4 V | Log a critical warning, skip audio, return to sleep |
+| Below 3.4 V | Log a critical warning, skip audio, return to sleep |
 | 3.4–3.6 V | Play normally and log a charge-soon warning |
 | 3.6 V and above | Play normally |
 
-The no-battery threshold is deliberately far below any plausible LiPo voltage.
-A collapsed cell in the 1.0–3.4 V range therefore fails closed instead of being
-mistaken for USB power. If every ADC conversion fails, playback is also skipped;
-a USB-only board with a working monitor still reads near zero and plays.
+The policy fails closed: any reading below 3.4 V refuses playback, whether that
+is a flat cell or a broken monitor, and if every ADC conversion fails playback is
+skipped too.
+
+**These thresholds only mean anything on battery power.** GPIO35 reads the BAT
+node, which is also the charger's output, so with USB-C connected the number is
+the cell's voltage *under charge* — above its resting voltage — and with no cell
+fitted at all it floats near the charger's regulation point. Measured on this
+board: battery unplugged, USB connected, the log reported ~4110 mV. Adafruit's
+own note that the `CHG` LED "might also flicker if the battery is not connected"
+describes the same behaviour.
+
+Nothing in software can separate those cases. The Feather V2 exposes no
+USB-presence or charge-status GPIO — the `CHG` LED is not routed to a pin — so
+distinguishing "charging" from "on battery" would require sensing the header's
+`USB` (VBUS) pin through a divider into a spare input. Until then, read the
+voltage as advisory whenever USB-C is plugged in.
 
 #### Calibrating the voltage scale
 
